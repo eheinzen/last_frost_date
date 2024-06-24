@@ -1,5 +1,6 @@
 # https://nowdata.rcc-acis.org/arx/
 # https://www.rcc-acis.org/docs_webservices.html
+# https://builder.rcc-acis.org/?
 library(httr2)
 library(tidyverse)
 #
@@ -32,56 +33,73 @@ library(tidyverse)
 #   map_dfr(set_names, c("date", "low", "nmiss"))
 
 
-j <- jsonlite::toJSON(list(
-  elems = map(c("mint", "maxt", "snow", "pcpn"), function(nm) {
-    list(
-      interval = c(0, 0, 1),
-      duration = "dly",
-      name = nm
+tmp <- map_dfr(.id = "city", c("Lake City" = "214438 2", "Zumbrota" = "219249 2", "Rochester" = "RSTthr 9"), function(sid) {
+
+  j <- jsonlite::toJSON(list(
+    elems = map(c("mint", "maxt", "snow", "pcpn"), function(nm) {
+      list(
+        interval = c(0, 0, 1),
+        duration = "dly",
+        name = nm
+      )
+    }),
+    sid = sid, # got this from the selection menu on the NOWData site
+    sDate = "por",
+    eDate = "por"
+  ), auto_unbox = TRUE)
+  print(j)
+
+  req <- request("https://data.rcc-acis.org/StnData") %>%
+    req_url_query(params=j) %>%
+    req_perform()
+  dat <- req %>%
+    resp_body_json()
+  together <- dat$data %>%
+    map_dfr(set_names, c("date", "min", "max", "snowfall", "precipitation")) %>%
+    mutate(
+      across(c(max, min), ~ as.numeric(replace(.x, .x == "M", NA))),
+      across(c(snowfall, precipitation), function(x) {
+        x %>%
+          replace(x %in% c("S", "M"), NA_real_) %>%
+          replace(x == "T", 0) %>%
+          sub(pattern = "A", replacement = "") %>%
+          as.numeric()
+      }),
+      date = as.Date(date)
     )
-  }),
-  sid = "RSTthr 9",
-  sDate = "por",
-  eDate = "por"
-), auto_unbox = TRUE)
-print(j)
+}) %>%
+  pivot_longer(c(min, max, snowfall, precipitation), values_to = "value", names_to = "measure")
+
+together <- tmp %>%
+  arrange(measure, desc(date), city == "Rochester", city == "Zumbrota") %>%
+  filter(!is.na(value)) %>%
+  distinct(measure, date, .keep_all = TRUE) %>%
+  complete(measure, date = full_seq(date, 1))
 
 
-req <- request("https://data.rcc-acis.org/StnData") %>%
-  req_url_query(params=j) %>%
-  req_perform()
-dat <- req %>%
-  resp_body_json()
 
-together <- dat$data %>%
-  map_dfr(set_names, c("date", "min", "max", "snowfall", "precipitation")) %>%
-  mutate(
-    across(c(max, min), ~ as.numeric(replace(.x, .x == "M", NA))),
-    date = as.Date(date)
-  )
 together %>%
-  filter(date >= "1993-01-01") %>%
-  ggplot(aes(x = date)) +
-  geom_line(aes(y = min), color = "blue") +
-  geom_line(aes(y = max), color = "red") +
+  filter(date >= "1993-01-01", measure %in% c("max", "min")) %>%
+  ggplot(aes(x = date, y = value, color = measure)) +
+  geom_line() +
+  scale_color_manual(values = c(max = "red", min = "blue")) +
   ylab("Degrees (F)") +
   xlab("Date")
 
 together %>%
-  filter(date >= "1993-01-01") %>%
-  mutate(
-    snowfall = case_when(
-      snowfall == "M" ~ NA_real_,
-      snowfall == "T" ~ 0,
-      TRUE ~ as.numeric(snowfall)
-    )
-  ) %>%
-  ggplot(aes(x = date)) +
-  geom_line(aes(y = snowfall), color = "blue") +
+  filter(date >= "1993-01-01", measure == "snowfall") %>%
+  ggplot(aes(x = date, y = value)) +
+  geom_line() +
   ylab("Snowfall (in)") +
   xlab("Date")
 
 
+together %>%
+  filter(date >= "1993-01-01", measure == "precipitation") %>%
+  ggplot(aes(x = date, y = value)) +
+  geom_line() +
+  ylab("Precipitation (in)") +
+  xlab("Date")
 
 # -------------------------------------------------------------------------
 
@@ -89,15 +107,16 @@ together %>%
 frost2 <- together %>%
   mutate(year = year(date)) %>%
   filter(
-    year < 2023,
+    year < 2024,
     date >= "1943-01-01",
-    date < paste0(year, "-07-01")
+    date < paste0(year, "-07-01"),
+    measure == "min"
   ) %>%
   group_by(year) %>%
   summarize(
-    nmiss = sum(is.na(min)),
-    `<= 32` = max(date[min <= 32], na.rm = TRUE),
-    `<= 35` = max(date[min <= 35], na.rm = TRUE)
+    nmiss = sum(is.na(value)),
+    `<= 32` = max(date[value <= 32], na.rm = TRUE),
+    `<= 35` = max(date[value <= 35], na.rm = TRUE)
   ) %>%
   ungroup() %>%
   pivot_longer(starts_with("<="), names_to = "cutoff", values_to = "date") %>%
@@ -113,9 +132,9 @@ ggplot(frost2, aes(x = year, y = md, color = cutoff)) +
 
 LL <- lm(days_in ~ I(year - 2000), data = frost2, subset = cutoff == "<= 32")
 conf <- map_dfr(rev(c(0.5, 0.75, 0.9, 0.95)), function(x) {
-  predict(LL, data.frame(year = 2023), interval  = "prediction", level = x) %>%
+  predict(LL, data.frame(year = 2024), interval  = "prediction", level = x) %>%
     as.data.frame() %>%
-    mutate(alpha = x, year = 2023)
+    mutate(alpha = x, year = 2024)
 }) %>%
   mutate(
     cutoff = "<= 32",
